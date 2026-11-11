@@ -1,0 +1,37 @@
+{
+  "loc_names": {
+    "LOC001": "Crystal Sports",
+    "LOC002": "Crystal Sports G"
+  },
+  "watches": [
+    {
+      "weekdays": [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri"
+      ],
+      "from": "18:00",
+      "to": "20:00",
+      "locs": [
+        "LOC001",
+        "LOC002"
+      ],
+      "days_ahead": 14
+    },
+    {
+      "weekdays": [
+        "sat",
+        "sun"
+      ],
+      "from": "12:00",
+      "to": "21:00",
+      "locs": [
+        "LOC001",
+        "LOC002"
+      ],
+      "days_ahead": 14
+    }
+  ]
+}
