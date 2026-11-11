@@ -1,16 +1,19 @@
 name: watch-courts
 on:
   schedule:
-    # ทุก 10 นาที ตลอดวัน: 09:00-23:50 เวลาไทยเช็กสนาม นอกนั้นแค่ต่ออายุ session
-    - cron: "*/10 * * * *"
+    # สำรอง: ถ้าบอทหยุดรันวน GitHub จะเริ่มให้ใหม่ภายในราวหนึ่งชั่วโมง
+    - cron: "7 * * * *"
   workflow_dispatch:
 concurrency:
   group: watch
   cancel-in-progress: false
+permissions:
+  contents: read
+  actions: write
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache/restore@v4
@@ -20,8 +23,12 @@ jobs:
             cookies.enc
           key: state-${{ github.run_id }}
           restore-keys: state-
-      - run: python3 watch.py
+      # รันวนราว 5 ชั่วโมง 20 นาที เช็กทุก 5 นาที
+      - id: loop
+        run: python3 watch.py
         env:
+          LOOP_SECONDS: "19200"
+          INTERVAL: "300"
           CRYSTAL_COOKIE: ${{ secrets.CRYSTAL_COOKIE }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
@@ -32,3 +39,8 @@ jobs:
             state.json
             cookies.enc
           key: state-${{ github.run_id }}
+      # เริ่มรอบถัดไปเอง ยกเว้นเมื่อ session หมดอายุ (รอให้อัปเดตคุกกี้ก่อน)
+      - if: success() && steps.loop.outputs.expired != 'true'
+        run: gh workflow run watch.yml --ref main -R "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -17,6 +17,7 @@ BASE = "https://crystalsports-booking.kegroup.co.th"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state.json")
 JAR_PATH = os.path.join(HERE, "cookies.enc")
+EXPIRED = 2  # ค่าที่ main() คืนเมื่อ session หมดอายุ
 ACTIVE_FROM_HOUR = 9  # ก่อนเวลานี้ (เวลาไทย) บอทแค่ต่ออายุ session ไม่เช็กสนาม
 BKK = dt.timezone(dt.timedelta(hours=7))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -125,7 +126,8 @@ def fetch(date, loc, jar):
 def notify_expired(state):
     if not state.get("expired_notified"):
         telegram("⚠️ Session ของ Crystal Sports หมดอายุ\n"
-                 "ล็อกอินใหม่ในเบราว์เซอร์ แล้วอัปเดต secret CRYSTAL_COOKIE ใน GitHub")
+                 "ล็อกอินใหม่ในเบราว์เซอร์ อัปเดต secret CRYSTAL_COOKIE ใน GitHub "
+                 "แล้วกด Run workflow ที่แท็บ Actions เพื่อเริ่มบอทใหม่")
     state["expired_notified"] = True
     save(state)
     print("session หมดอายุ")
@@ -138,7 +140,10 @@ def telegram(text):
         return
     data = urllib.parse.urlencode({"chat_id": chat, "text": text,
                                    "disable_web_page_preview": "true"}).encode()
-    urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=30).read()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=30).read()
+    except Exception as e:
+        print(f"ส่ง Telegram ไม่สำเร็จ: {type(e).__name__}")
 
 
 def target_dates(watch, today):
@@ -172,7 +177,7 @@ def main():
         status, body, changed = fetch(now.date().isoformat(), "LOC001", jar)
         if status == "expired":
             notify_expired(state)
-            return 0
+            return EXPIRED
         save_jar(jar, secret)
         print(f"กลางคืน: ต่ออายุ session ({status}) · คุกกี้ที่เว็บออกใหม่: {', '.join(changed) or '-'}")
         return 0
@@ -189,7 +194,7 @@ def main():
         renewed.update(changed)
         if status == "expired":
             notify_expired(state)
-            return 0
+            return EXPIRED
         if status == "error":
             errors.append(f"{date} {loc}: {body}")
             for k, v in seen.items():  # เก็บสถานะเดิมไว้ จะได้ไม่เตือนซ้ำ
@@ -242,5 +247,28 @@ if __name__ == "__main__":
         with open(sys.argv[2], encoding="utf-8") as f:
             for s in parse_slots(f.read()):
                 print(s["time"], "ว่าง %d" % s["count"] if s["free"] else "-", s["href"] or "")
+    elif os.environ.get("LOOP_SECONDS"):
+        # โหมดรันวน: เช็กทุก INTERVAL วินาที จนครบ LOOP_SECONDS แล้วจบเพื่อให้ workflow เริ่มรอบใหม่
+        deadline = time.time() + int(os.environ["LOOP_SECONDS"])
+        interval = int(os.environ.get("INTERVAL", "300"))
+        expired = False
+        while True:
+            started = time.time()
+            print(dt.datetime.now(BKK).strftime("--- %d/%m %H:%M ---"), flush=True)
+            subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=HERE, capture_output=True)  # รับ config ที่แก้ใหม่
+            try:
+                if main() == EXPIRED:
+                    expired = True
+                    break
+            except Exception as e:
+                print(f"รอบนี้ผิดพลาด: {type(e).__name__}: {e}", flush=True)
+            sys.stdout.flush()
+            wait = interval - (time.time() - started)
+            if time.time() + max(wait, 0) >= deadline:
+                break
+            time.sleep(max(wait, 0))
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                f.write(f"expired={'true' if expired else 'false'}\n")
     else:
-        sys.exit(main())
+        sys.exit(0 if main() in (0, EXPIRED) else 1)
