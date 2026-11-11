@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """เฝ้าดูสนามว่างของ Crystal Sports แล้วแจ้งเตือนทาง Telegram (อ่านอย่างเดียว ไม่กดจอง)"""
 import datetime as dt
+import hashlib
 import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -14,6 +16,8 @@ import urllib.request
 BASE = "https://crystalsports-booking.kegroup.co.th"
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state.json")
+JAR_PATH = os.path.join(HERE, "cookies.enc")
+ACTIVE_FROM_HOUR = 9  # ก่อนเวลานี้ (เวลาไทย) บอทแค่ต่ออายุ session ไม่เช็กสนาม
 BKK = dt.timezone(dt.timedelta(hours=7))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAYS_TH = ["จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส.", "อา."]
@@ -47,24 +51,84 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def fetch(date, loc, cookie):
-    """คืน (สถานะ, เนื้อหา) โดยสถานะเป็น ok / expired / error"""
+def parse_cookie_header(text):
+    jar = {}
+    for part in text.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name:
+            jar[name] = value
+    return jar
+
+
+def absorb_set_cookies(jar, headers):
+    """อัปเดตคุกกี้ตามที่เว็บส่งกลับมา (เว็บต่ออายุ session ด้วยวิธีนี้) คืนชื่อคุกกี้ที่เปลี่ยน"""
+    changed = []
+    for line in headers.get_all("Set-Cookie") or []:
+        name, sep, value = line.split(";", 1)[0].strip().partition("=")
+        if not sep or not name:
+            continue
+        if value == "":
+            if jar.pop(name, None) is not None:
+                changed.append(name)
+        elif jar.get(name) != value:
+            jar[name] = value
+            changed.append(name)
+    return changed
+
+
+def _openssl(args, data, key):
+    return subprocess.run(["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-pass", "env:CW_KEY"] + args,
+                          input=data, capture_output=True, env={**os.environ, "CW_KEY": key})
+
+
+def load_jar(secret):
+    """เริ่มจากคุกกี้ใน secret แล้วทับด้วยชุดที่ต่ออายุไว้จากรอบก่อน (ถ้าถอดรหัสได้)
+
+    ไฟล์ที่เก็บถูกเข้ารหัสด้วยกุญแจที่ได้จาก secret เอง เมื่อเปลี่ยน secret ไฟล์เก่าจะถอดไม่ออกและถูกทิ้ง
+    """
+    jar = parse_cookie_header(secret)
+    if os.path.exists(JAR_PATH):
+        r = _openssl(["-d", "-in", JAR_PATH], None, hashlib.sha256(secret.encode()).hexdigest())
+        if r.returncode == 0:
+            try:
+                return json.loads(r.stdout)
+            except ValueError:
+                pass
+    return jar
+
+
+def save_jar(jar, secret):
+    if secret:
+        _openssl(["-out", JAR_PATH], json.dumps(jar).encode(), hashlib.sha256(secret.encode()).hexdigest())
+
+
+def fetch(date, loc, jar):
+    """คืน (สถานะ, เนื้อหา, ชื่อคุกกี้ที่เปลี่ยน) โดยสถานะเป็น ok / expired / error"""
     url = f"{BASE}/booking?date={date}&loc={loc}&time=0&sel="
     req = urllib.request.Request(url, headers={
-        "Cookie": cookie,
+        "Cookie": "; ".join(f"{k}={v}" for k, v in jar.items()),
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36",
         "Accept-Language": "th",
     })
     try:
         with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as r:
-            return "ok", r.read().decode("utf-8", "replace")
+            return "ok", r.read().decode("utf-8", "replace"), absorb_set_cookies(jar, r.headers)
     except urllib.error.HTTPError as e:
         if e.code in (301, 302, 303, 307) and "/account/login" in (e.headers.get("Location") or ""):
-            return "expired", ""
-        return "error", f"HTTP {e.code}"
+            return "expired", "", []
+        return "error", f"HTTP {e.code}", []
     except Exception as e:  # เครือข่ายล่ม ฯลฯ
-        return "error", str(e)
+        return "error", str(e), []
+
+
+def notify_expired(state):
+    if not state.get("expired_notified"):
+        telegram("⚠️ Session ของ Crystal Sports หมดอายุ\n"
+                 "ล็อกอินใหม่ในเบราว์เซอร์ แล้วอัปเดต secret CRYSTAL_COOKIE ใน GitHub")
+    state["expired_notified"] = True
+    save(state)
+    print("session หมดอายุ")
 
 
 def telegram(text):
@@ -98,8 +162,20 @@ def main():
     except (OSError, ValueError):
         state = {}
     seen = state.get("seen", {})
-    cookie = os.environ.get("CRYSTAL_COOKIE", "").strip()
+    secret = os.environ.get("CRYSTAL_COOKIE", "").strip()
+    jar = load_jar(secret)
     now = dt.datetime.now(BKK)
+    renewed = set()
+
+    if now.hour < ACTIVE_FROM_HOUR and not os.environ.get("FORCE_FULL"):
+        # กลางคืน: เปิดหน้าเดียวเพื่อไม่ให้ session ขาด
+        status, body, changed = fetch(now.date().isoformat(), "LOC001", jar)
+        if status == "expired":
+            notify_expired(state)
+            return 0
+        save_jar(jar, secret)
+        print(f"กลางคืน: ต่ออายุ session ({status}) · คุกกี้ที่เว็บออกใหม่: {', '.join(changed) or '-'}")
+        return 0
 
     jobs = {}  # (date, loc) -> ช่วงเวลาที่ต้องการ
     for w in config["watches"]:
@@ -109,15 +185,10 @@ def main():
 
     found, new_seen, errors = [], {}, []
     for (date, loc), ranges in sorted(jobs.items()):
-        status, body = fetch(date, loc, cookie)
+        status, body, changed = fetch(date, loc, jar)
+        renewed.update(changed)
         if status == "expired":
-            if not state.get("expired_notified"):
-                telegram("⚠️ Session ของ Crystal Sports หมดอายุ\n"
-                         "ล็อกอินใหม่ในเบราว์เซอร์ แล้วอัปเดต secret CRYSTAL_COOKIE ใน GitHub")
-            state["expired_notified"] = True
-            state["seen"] = seen
-            save(state)
-            print("session หมดอายุ")
+            notify_expired(state)
             return 0
         if status == "error":
             errors.append(f"{date} {loc}: {body}")
@@ -153,6 +224,8 @@ def main():
     if state["error_streak"] == 3:
         telegram("⚠️ บอทเช็กสนามไม่ได้ 3 รอบติด:\n" + "\n".join(errors[:5]))
     save(state)
+    save_jar(jar, secret)
+    print(f"คุกกี้ที่เว็บออกใหม่รอบนี้: {', '.join(sorted(renewed)) or '-'}")
     print(f"เช็ก {len(jobs)} หน้า · ว่างตรงเงื่อนไข {len(new_seen)} · แจ้งใหม่ {len(found)} · ผิดพลาด {len(errors)}")
     for e in errors:
         print("  " + e)
