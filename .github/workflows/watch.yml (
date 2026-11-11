@@ -1,0 +1,30 @@
+name: watch-courts
+on:
+  schedule:
+    # 09:00-23:50 เวลาไทย (cron ของ GitHub เป็นเวลา UTC)
+    - cron: "*/10 2-16 * * *"
+  workflow_dispatch:
+concurrency:
+  group: watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+      - run: python3 watch.py
+        env:
+          CRYSTAL_COOKIE: ${{ secrets.CRYSTAL_COOKIE }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
