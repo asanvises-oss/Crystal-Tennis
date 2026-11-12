@@ -367,8 +367,12 @@ def answer(text, config, state, jar, now):
     lines = [f"สนามว่าง {DAYS_TH[day.weekday()]} {day.day}/{day.month}"]
     for loc in names:
         status, body, _ = fetch(day.isoformat(), loc, jar)
+        if status != "ok":  # ลองซ้ำหนึ่งครั้ง เผื่อเว็บสะดุดชั่วคราว
+            time.sleep(3)
+            status, body, _ = fetch(day.isoformat(), loc, jar)
         if status != "ok":
-            return "เข้าเว็บสนามไม่ได้ตอนนี้ ลองใหม่อีกสักครู่"
+            why = "ถูกส่งไปหน้าล็อกอิน" if status == "expired" else body
+            return f"เข้าเว็บสนามไม่ได้ตอนนี้ ({why}) ลองใหม่อีกสักครู่"
         slots = parse_slots(body)
         free = [f"{x['time']} ({x['count']})" for x in slots if x["free"]]
         if not slots:
