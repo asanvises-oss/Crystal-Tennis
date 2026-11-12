@@ -316,6 +316,119 @@ def telegram(text):
         print(f"ส่ง Telegram ไม่สำเร็จ: {type(e).__name__}")
 
 
+# ---------- ตอบคำถามใน Telegram ----------
+
+DAY_WORDS = [("จันทร์", 0), ("อังคาร", 1), ("พุธ", 2), ("พฤหัส", 3), ("ศุกร์", 4), ("เสาร์", 5), ("อาทิตย์", 6)]
+HELP = ("พิมพ์ได้ดังนี้\n"
+        "• วันนี้ / พรุ่งนี้ / เสาร์ / 15/11 : ดูช่องที่ว่างของวันนั้น\n"
+        "• สถานะ : ดูว่าบอททำงานอยู่ไหม\n"
+        "• wallet : ดูยอดเงินคงเหลือ")
+
+
+def parse_day(text, today):
+    """หาวันที่ที่ผู้ใช้ถามถึง คืน None ถ้าไม่พบ"""
+    m = re.search(r"(\d{1,2})\s*/\s*(\d{1,2})", text)
+    if m:
+        try:
+            d = dt.date(today.year, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+        return d if d >= today else d.replace(year=today.year + 1)
+    if "วันนี้" in text or "today" in text:
+        return today
+    if "พรุ่งนี้" in text:
+        return today + dt.timedelta(days=1)
+    if "มะรืน" in text:
+        return today + dt.timedelta(days=2)
+    for word, wd in DAY_WORDS:
+        if word in text:
+            return today + dt.timedelta(days=(wd - today.weekday()) % 7)
+    return None
+
+
+def answer(text, config, state, jar, now):
+    """สร้างคำตอบสำหรับข้อความหนึ่งข้อความ"""
+    t = text.strip().lower()
+    names = config.get("loc_names", {"LOC001": "LOC001"})
+    if "สถานะ" in t or "status" in t:
+        ab = config.get("auto_book") or {}
+        mode = "ปิด" if not ab.get("enabled") else ("โหมดซ้อม" if ab.get("dry_run", True) else "จองจริง")
+        if state.get("paused_reset") == ab.get("reset", 0) and ab.get("enabled"):
+            mode += " (หยุดไว้ รอตรวจผลการจอง)"
+        web = "เข้าไม่ได้ กำลังลองใหม่" if state.get("expired_streak") else "ปกติ"
+        return (f"🤖 บอททำงานอยู่\nเช็กล่าสุด: {state.get('last_check', 'ยังไม่มี')}\n"
+                f"เว็บสนาม: {web}\nจองอัตโนมัติ: {mode}")
+    if "wallet" in t or "วอลเล็ต" in t or "ยอดเงิน" in t:
+        bal = wallet_balance(jar)
+        return f"Wallet คงเหลือ ฿{bal:,}" if bal is not None else "อ่านยอด Wallet ไม่ได้ตอนนี้"
+    day = parse_day(t, now.date())
+    if day is None:
+        return HELP
+    lines = [f"สนามว่าง {DAYS_TH[day.weekday()]} {day.day}/{day.month}"]
+    for loc in names:
+        status, body, _ = fetch(day.isoformat(), loc, jar)
+        if status != "ok":
+            return "เข้าเว็บสนามไม่ได้ตอนนี้ ลองใหม่อีกสักครู่"
+        slots = parse_slots(body)
+        free = [f"{x['time']} ({x['count']})" for x in slots if x["free"]]
+        if not slots:
+            lines.append(f"\n{names[loc]}: ยังไม่เปิดให้จองหรือไม่มีข้อมูล")
+        elif not free:
+            lines.append(f"\n{names[loc]}: เต็มทุกช่อง")
+        else:
+            lines.append(f"\n{names[loc]}: " + ", ".join(free) +
+                         f"\n{BASE}/booking?date={day.isoformat()}&loc={loc}&time=0&sel=")
+    lines.append("\nตัวเลขในวงเล็บคือจำนวนสนามที่ว่าง")
+    return "\n".join(lines)
+
+
+def tg_updates(offset, timeout):
+    token = os.environ["TG_TOKEN"]
+    q = urllib.parse.urlencode({"offset": offset, "timeout": timeout, "allowed_updates": '["message"]'})
+    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/getUpdates?{q}", timeout=timeout + 15) as r:
+        return json.load(r).get("result", [])
+
+
+def listen(seconds):
+    """รอจนครบเวลา ระหว่างนั้นตอบข้อความจากเจ้าของบอทใน Telegram"""
+    end = time.time() + seconds
+    if not (os.environ.get("TG_TOKEN") and os.environ.get("TG_CHAT_ID")):
+        time.sleep(max(seconds, 0))
+        return
+    secret = os.environ.get("CRYSTAL_COOKIE", "").strip()
+    while time.time() < end:
+        try:
+            with open(STATE_PATH, encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            state = {}
+        try:
+            updates = tg_updates(state.get("tg_offset", 0), int(max(1, min(25, end - time.time()))))
+        except Exception as e:
+            print(f"ฟัง Telegram ไม่ได้: {type(e).__name__}", flush=True)
+            time.sleep(max(0, min(10, end - time.time())))
+            continue
+        for u in updates:
+            state["tg_offset"] = u["update_id"] + 1
+            msg = u.get("message") or {}
+            if str((msg.get("chat") or {}).get("id")) != os.environ["TG_CHAT_ID"]:
+                continue  # ตอบเฉพาะเจ้าของบอท
+            if time.time() - msg.get("date", 0) > 600 or not msg.get("text"):
+                continue  # ข้ามข้อความเก่าที่ค้างอยู่
+            try:
+                with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
+                    config = json.load(f)
+                jar = load_jar(secret)
+                reply = answer(msg["text"], config, state, jar, dt.datetime.now(BKK))
+                save_jar(jar, secret)
+            except Exception as e:
+                reply = f"ตอบไม่ได้ตอนนี้ ({type(e).__name__})"
+            telegram(reply)
+            print("ตอบข้อความใน Telegram 1 ข้อความ", flush=True)
+        if updates:
+            save(state)
+
+
 def target_dates(watch, today):
     if watch.get("dates"):
         return [d for d in watch["dates"] if d >= today.isoformat()]
@@ -409,6 +522,8 @@ def main():
     state["error_streak"] = state.get("error_streak", 0) + 1 if errors else 0
     if state["error_streak"] == 3:
         telegram("⚠️ บอทเช็กสนามไม่ได้ 3 รอบติด:\n" + "\n".join(errors[:5]))
+    state["last_check"] = (f"{now:%d/%m %H:%M} · ว่างตรงเงื่อนไข {len(new_seen)} ช่อง"
+                           + (f" · อ่านไม่ได้ {len(errors)} หน้า" if errors else ""))
     save(state)
     auto_book(state, config, jar, free_now, now)
     save_jar(jar, secret)
@@ -447,6 +562,6 @@ if __name__ == "__main__":
             # เข้าเว็บไม่ได้ครบ 30 นาที: จบรอบนี้เพื่อให้รอบใหม่อ่านคุกกี้ที่อาจถูกอัปเดต
             if time.time() + max(wait, 0) >= deadline or expired_rounds >= 6:
                 break
-            time.sleep(max(wait, 0))
+            listen(max(wait, 0))
     else:
         sys.exit(0 if main() in (0, EXPIRED) else 1)
