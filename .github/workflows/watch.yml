@@ -39,8 +39,8 @@ jobs:
             state.json
             cookies.enc
           key: state-${{ github.run_id }}
-      # เริ่มรอบถัดไปเอง ยกเว้นเมื่อ session หมดอายุ (รอให้อัปเดตคุกกี้ก่อน)
-      - if: success() && steps.loop.outputs.expired != 'true'
+      # เริ่มรอบถัดไปเองเสมอ (ถ้าเข้าเว็บไม่ได้ รอบจะสั้นลงเหลือ 30 นาทีเพื่ออ่านคุกกี้ใหม่)
+      - if: success()
         run: gh workflow run watch.yml --ref main -R "$GITHUB_REPOSITORY"
         env:
           GH_TOKEN: ${{ github.token }}

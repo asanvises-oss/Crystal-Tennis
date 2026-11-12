@@ -282,14 +282,25 @@ def auto_book(state, config, jar, free_now, now):
         return  # รอบละไม่เกินหนึ่งครั้ง
 
 
+EXPIRED_NOTIFY_AFTER = 3  # แจ้งเมื่อถูกเด้งไปหน้าล็อกอินติดกันกี่รอบ (เว็บมีอาการชั่วคราวได้)
+
+
 def notify_expired(state):
-    if not state.get("expired_notified"):
-        telegram("⚠️ Session ของ Crystal Sports หมดอายุ\n"
-                 "ล็อกอินใหม่ในเบราว์เซอร์ อัปเดต secret CRYSTAL_COOKIE ใน GitHub "
-                 "แล้วกด Run workflow ที่แท็บ Actions เพื่อเริ่มบอทใหม่")
-    state["expired_notified"] = True
+    """นับรอบที่ถูกเด้งไปหน้าล็อกอิน แจ้งครั้งเดียวเมื่อเกิดติดกันหลายรอบ แล้วลองต่อทุกรอบ"""
+    state["expired_streak"] = state.get("expired_streak", 0) + 1
+    if state["expired_streak"] == EXPIRED_NOTIFY_AFTER:
+        telegram("⚠️ บอทเข้าเว็บ Crystal Sports ไม่ได้ (ถูกส่งไปหน้าล็อกอิน) มา 15 นาทีแล้ว\n"
+                 "บอทจะลองต่อเองทุก 5 นาที และจะแจ้งเมื่อกลับมาใช้ได้\n"
+                 "ถ้าไม่กลับมาเอง ให้ล็อกอินใหม่ในคอมแล้วอัปเดต secret CRYSTAL_COOKIE "
+                 "(มีผลภายในราว 30 นาที)")
     save(state)
-    print("session หมดอายุ")
+    print(f"ถูกส่งไปหน้าล็อกอิน (ติดกัน {state['expired_streak']} รอบ)")
+
+
+def session_ok(state):
+    if state.get("expired_streak", 0) >= EXPIRED_NOTIFY_AFTER:
+        telegram("✅ บอทกลับมาเข้าเว็บ Crystal Sports ได้แล้ว")
+    state["expired_streak"] = 0
 
 
 def telegram(text):
@@ -337,7 +348,10 @@ def main():
         if status == "expired":
             notify_expired(state)
             return EXPIRED
-        save_jar(jar, secret)
+        if status == "ok":
+            session_ok(state)
+            save(state)
+            save_jar(jar, secret)
         print(f"กลางคืน: ต่ออายุ session ({status}) · คุกกี้ที่เว็บออกใหม่: {', '.join(changed) or '-'}")
         return 0
 
@@ -374,7 +388,7 @@ def main():
                 found.append((date, loc, s))
         time.sleep(1)
 
-    state["expired_notified"] = False
+    session_ok(state)
     state["seen"] = new_seen
     if found:
         names = config.get("loc_names", {})
@@ -412,24 +426,20 @@ if __name__ == "__main__":
         # โหมดรันวน: เช็กทุก INTERVAL วินาที จนครบ LOOP_SECONDS แล้วจบเพื่อให้ workflow เริ่มรอบใหม่
         deadline = time.time() + int(os.environ["LOOP_SECONDS"])
         interval = int(os.environ.get("INTERVAL", "300"))
-        expired = False
+        expired_rounds = 0
         while True:
             started = time.time()
             print(dt.datetime.now(BKK).strftime("--- %d/%m %H:%M ---"), flush=True)
             subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=HERE, capture_output=True)  # รับ config ที่แก้ใหม่
             try:
-                if main() == EXPIRED:
-                    expired = True
-                    break
+                expired_rounds = expired_rounds + 1 if main() == EXPIRED else 0
             except Exception as e:
                 print(f"รอบนี้ผิดพลาด: {type(e).__name__}: {e}", flush=True)
             sys.stdout.flush()
             wait = interval - (time.time() - started)
-            if time.time() + max(wait, 0) >= deadline:
+            # เข้าเว็บไม่ได้ครบ 30 นาที: จบรอบนี้เพื่อให้รอบใหม่อ่านคุกกี้ที่อาจถูกอัปเดต
+            if time.time() + max(wait, 0) >= deadline or expired_rounds >= 6:
                 break
             time.sleep(max(wait, 0))
-        if os.environ.get("GITHUB_OUTPUT"):
-            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-                f.write(f"expired={'true' if expired else 'false'}\n")
     else:
         sys.exit(0 if main() in (0, EXPIRED) else 1)
