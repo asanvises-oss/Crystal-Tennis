@@ -109,6 +109,14 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def http(jar, path, data=None):
     """เรียกเว็บสนามหนึ่งครั้งโดยไม่ตาม redirect คืน (รหัสสถานะ, เนื้อหา, Location, ชื่อคุกกี้ที่เปลี่ยน)"""
+    code, body, location, changed = _http(jar, path, data)
+    # เว็บหมุนคุกกี้ล็อกอินเป็นระยะ ต้องบันทึกทันที ไม่อย่างนั้นถ้างานถูกหยุดกลางรอบ ชุดใหม่จะหายและชุดเก่าใช้ไม่ได้
+    if code == 200 and "cs.member" in changed:
+        save_jar(jar, os.environ.get("CRYSTAL_COOKIE", "").strip())
+    return code, body, location, changed
+
+
+def _http(jar, path, data=None):
     headers = {"Cookie": "; ".join(f"{k}={v}" for k, v in jar.items()),
                "User-Agent": UA, "Accept-Language": "th"}
     body = None
