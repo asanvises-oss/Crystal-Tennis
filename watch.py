@@ -18,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(HERE, "state.json")
 JAR_PATH = os.path.join(HERE, "cookies.enc")
 EXPIRED = 2  # ค่าที่ main() คืนเมื่อ session หมดอายุ
-ACTIVE_FROM_HOUR = 9  # ก่อนเวลานี้ (เวลาไทย) บอทแค่ต่ออายุ session ไม่เช็กสนาม
+NIGHT_KEEPALIVE_MINUTES = 60  # นอกเวลาทำงาน เข้าเว็บแค่ชั่วโมงละครั้งเพื่อไม่ให้ session ขาด
 BKK = dt.timezone(dt.timedelta(hours=7))
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DAYS_TH = ["จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส.", "อา."]
@@ -342,8 +342,15 @@ def main():
     now = dt.datetime.now(BKK)
     renewed = set()
 
-    if now.hour < ACTIVE_FROM_HOUR and not os.environ.get("FORCE_FULL"):
-        # กลางคืน: เปิดหน้าเดียวเพื่อไม่ให้ session ขาด
+    hours = config.get("active_hours") or {}
+    if not hours.get("from", 8) <= now.hour < hours.get("to", 23) and not os.environ.get("FORCE_FULL"):
+        # นอกเวลาทำงาน: ไม่เช็กสนาม เปิดหน้าเดียวชั่วโมงละครั้งเพื่อไม่ให้ session ขาด
+        last = state.get("last_keepalive")
+        if last and (now - dt.datetime.fromisoformat(last)).total_seconds() < NIGHT_KEEPALIVE_MINUTES * 60 - 150:
+            print("กลางคืน: พัก")
+            return 0
+        state["last_keepalive"] = now.isoformat()
+        save(state)
         status, body, changed = fetch(now.date().isoformat(), "LOC001", jar)
         if status == "expired":
             notify_expired(state)

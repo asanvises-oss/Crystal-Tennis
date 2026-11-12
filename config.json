@@ -3,6 +3,10 @@
     "LOC001": "Crystal Sports",
     "LOC002": "Crystal Sports G"
   },
+  "active_hours": {
+    "from": 8,
+    "to": 23
+  },
   "auto_book": {
     "enabled": true,
     "dry_run": true,
