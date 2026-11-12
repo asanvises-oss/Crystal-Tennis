@@ -9,7 +9,7 @@
   },
   "auto_book": {
     "enabled": true,
-    "dry_run": true,
+    "dry_run": false,
     "min_hours_ahead": 25,
     "max_per_day": 1,
     "max_per_week": 2,
