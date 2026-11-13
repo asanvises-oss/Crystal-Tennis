@@ -162,6 +162,49 @@ def parse_courts(page):
     return out
 
 
+def _attr(tag, name):
+    m = re.search(r'\b' + name + r'\s*=\s*"([^"]*)"', tag)
+    return html.unescape(m.group(1)) if m else None
+
+
+def form_fields(form):
+    """ค่าที่เบราว์เซอร์จะส่งเมื่อกดยืนยัน โดยเลือกจ่ายด้วย Wallet และไม่เลือกโค้ช
+
+    คืน (รายการคู่ชื่อ-ค่า ที่ยังไม่รวมช่องติ๊ก, รายการช่องติ๊กที่ยังไม่ได้ติ๊ก [(ชื่อ, ค่า)])
+    """
+    fields, checkboxes = [], []
+    for tag in re.findall(r"<input\b[^>]*>", form):
+        name, kind = _attr(tag, "name"), (_attr(tag, "type") or "text").lower()
+        if not name or re.search(r"\bdisabled\b", tag):
+            continue
+        value = _attr(tag, "value")
+        if kind == "checkbox":
+            if re.search(r"\bchecked\b", tag):
+                fields.append((name, value if value is not None else "on"))
+            else:  # เก็บตำแหน่งไว้ เพื่อส่งตามลำดับเดียวกับที่เบราว์เซอร์ส่ง
+                checkboxes.append((name, value if value is not None else "on"))
+                fields.append((name, None))
+        elif kind == "radio":
+            if name == "method":
+                if value == "WALLET":
+                    fields.append((name, value))
+            elif re.search(r"\bchecked\b", tag):
+                fields.append((name, value or "on"))
+        elif kind not in ("submit", "button", "image", "file", "reset"):
+            fields.append((name, value or ""))
+    for tag, body in re.findall(r"(<select\b[^>]*>)(.*?)</select>", form, re.S):
+        name = _attr(tag, "name")
+        if not name or re.search(r"\bdisabled\b", tag):
+            continue
+        if name.startswith("coach_"):
+            fields.append((name, ""))  # ไม่เลือกโค้ช
+            continue
+        opts = re.findall(r"<option\b[^>]*>", body)
+        chosen = next((o for o in opts if re.search(r"\bselected\b", o)), opts[0] if opts else "")
+        fields.append((name, _attr(chosen, "value") or ""))
+    return fields, checkboxes
+
+
 def parse_review(page):
     """อ่านฟอร์มยืนยันการจอง คืน None ถ้าไม่ใช่หน้าที่คาดไว้"""
     m = re.search(r'<form[^>]*id="bkForm"[^>]*action="/booking/confirm"[^>]*data-base="(\d+)".*?</form>', page, re.S)
@@ -173,7 +216,9 @@ def parse_review(page):
     title = re.search(r'<b>([^<]+)</b><div class="text-muted text-sm">([^<]+)</div>', form)
     if not (sel and token and title):
         return None
-    return {"price": int(m.group(1)), "sel": sel.group(1), "token": token.group(1),
+    fields, checkboxes = form_fields(form)
+    return {"fields": fields, "checkboxes": checkboxes,
+            "price": int(m.group(1)), "sel": sel.group(1), "token": token.group(1),
             "court": html.unescape(title.group(1)).strip(), "when": html.unescape(title.group(2)).strip(),
             "wallet": 'name="method" value="WALLET"' in form,
             "items": len(re.findall(r'name="coach_', form))}
@@ -226,12 +271,21 @@ def book_slot(jar, date, loc, slot, cfg):
         return "skipped", "อ่านยอด Wallet ไม่ได้", info
     if before < rv["price"]:
         return "skipped", f"Wallet ไม่พอ (มี ฿{before} ต้องใช้ ฿{rv['price']})", info
+    boxes = dict(rv["checkboxes"])
+    tick = bool(cfg.get("accept_terms")) and len(rv["checkboxes"]) == 1
+    data = [(n, boxes[n] if v is None else v) for n, v in rv["fields"] if v is not None or tick]
+    if rv["checkboxes"]:
+        # หน้ายืนยันมีช่องให้ติ๊กยอมรับข้อตกลงของสนาม บอทติ๊กแทนได้เมื่อเจ้าของบัญชีอนุญาตไว้ใน config เท่านั้น
+        info["terms_box"] = ", ".join(n for n, _ in rv["checkboxes"])
+        if len(rv["checkboxes"]) > 1:
+            return "skipped", f"หน้ายืนยันมีช่องติ๊กหลายช่อง ({info['terms_box']}) บอทไม่ติ๊กเอง", info
+        if not cfg.get("accept_terms"):
+            return "skipped", "หน้ายืนยันต้องติ๊กยอมรับข้อตกลงของสนาม แต่ยังไม่ได้อนุญาตให้บอทติ๊กแทน (accept_terms)", info
     if cfg.get("dry_run", True):
-        return "dry", "โหมดซ้อม: ผ่านทุกขั้น หยุดก่อนกดยืนยันการจอง", info
+        return "dry", "โหมดซ้อม: ผ่านทุกขั้น หยุดก่อนกดยืนยันการจอง" + (
+            f" (จะติ๊กยอมรับข้อตกลง: {info['terms_box']})" if rv["checkboxes"] else ""), info
 
-    code, page, location, _ = http(jar, "/booking/confirm", {
-        "sel": rv["sel"], f"coach_{rv['sel']}": "", "method": "WALLET",
-        "__RequestVerificationToken": rv["token"]})
+    code, page, location, _ = http(jar, "/booking/confirm", data)
     trail = [f"{code} {location.split('?')[0]}".strip()]
     for _ in range(3):  # ตาม redirect หลังกดยืนยัน
         if code not in (301, 302, 303, 307) or not location.startswith("/"):
