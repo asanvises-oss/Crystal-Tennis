@@ -14,7 +14,7 @@
     "max_per_day": 1,
     "max_per_week": 2,
     "max_price": 700,
-    "reset": 0
+    "reset": 1
   },
   "watches": [
     {
