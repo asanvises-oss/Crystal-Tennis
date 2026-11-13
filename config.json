@@ -8,6 +8,10 @@
     "from": 8,
     "to": 23
   },
+  "skip_dates": [
+    "2026-11-14",
+    "2026-11-15"
+  ],
   "auto_book": {
     "enabled": true,
     "dry_run": false,

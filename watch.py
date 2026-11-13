@@ -353,8 +353,42 @@ def telegram(text):
 DAY_WORDS = [("จันทร์", 0), ("อังคาร", 1), ("พุธ", 2), ("พฤหัส", 3), ("ศุกร์", 4), ("เสาร์", 5), ("อาทิตย์", 6)]
 HELP = ("พิมพ์ได้ดังนี้\n"
         "• วันนี้ / พรุ่งนี้ / เสาร์ / 15/11 : ดูช่องที่ว่างของวันนั้น\n"
+        "• ข้าม เสาร์ อาทิตย์ / ข้าม 20/11 : ไม่ต้องหาและไม่จองวันนั้น\n"
+        "• ยกเลิกข้าม / ยกเลิกข้าม 20/11 : กลับมาหาตามปกติ\n"
         "• สถานะ : ดูว่าบอททำงานอยู่ไหม\n"
         "• wallet : ดูยอดเงินคงเหลือ")
+
+
+def parse_days(text, today):
+    """หาทุกวันที่ที่ข้อความพูดถึง (ใช้กับคำสั่งข้าม) เรียงตามวันที่"""
+    days = set()
+    for dd, mm in re.findall(r"(\d{1,2})\s*/\s*(\d{1,2})", text):
+        try:
+            d = dt.date(today.year, int(mm), int(dd))
+        except ValueError:
+            continue
+        days.add(d if d >= today else d.replace(year=today.year + 1))
+    for word, offset in (("วันนี้", 0), ("พรุ่งนี้", 1), ("มะรืน", 2)):
+        if word in text:
+            days.add(today + dt.timedelta(days=offset))
+    for word, wd in DAY_WORDS:
+        if word in text:
+            days.add(today + dt.timedelta(days=(wd - today.weekday()) % 7))
+    return sorted(days)
+
+
+def fmt_days(isos):
+    out = []
+    for iso in sorted(isos):
+        d = dt.date.fromisoformat(iso)
+        out.append(f"{DAYS_TH[d.weekday()]} {d.day}/{d.month}")
+    return ", ".join(out) or "ไม่มี"
+
+
+def skipped_dates(config, state, today):
+    """วันที่ไม่ต้องหาและไม่จอง รวมจาก config และที่สั่งผ่าน Telegram ตัดวันที่ผ่านไปแล้วออก"""
+    iso = today.isoformat()
+    return {d for d in list(config.get("skip_dates", [])) + list(state.get("skip_dates", [])) if d >= iso}
 
 
 def parse_day(text, today):
@@ -382,6 +416,20 @@ def answer(text, config, state, jar, now):
     """สร้างคำตอบสำหรับข้อความหนึ่งข้อความ"""
     t = text.strip().lower()
     names = config.get("loc_names", {"LOC001": "LOC001"})
+    if "ข้าม" in t:
+        today = now.date()
+        mine = {d for d in state.get("skip_dates", []) if d >= today.isoformat()}
+        days = {d.isoformat() for d in parse_days(t, today)}
+        if "ยกเลิก" in t or "ไม่ข้าม" in t or "เลิกข้าม" in t:
+            mine = mine - days if days else set()
+            head = "กลับมาหาตามปกติแล้ว"
+        elif days:
+            mine |= days
+            head = "รับทราบ จะไม่หาและไม่จองวันที่ข้าม"
+        else:
+            head = "ไม่พบวันที่ในข้อความ ลองพิมพ์เช่น: ข้าม เสาร์ อาทิตย์ หรือ ข้าม 20/11"
+        state["skip_dates"] = sorted(mine)
+        return f"{head}\nวันที่ข้ามอยู่ตอนนี้: {fmt_days(skipped_dates(config, state, today))}"
     if "สถานะ" in t or "status" in t:
         ab = config.get("auto_book") or {}
         mode = "ปิด" if not ab.get("enabled") else ("โหมดซ้อม" if ab.get("dry_run", True) else "จองจริง")
@@ -389,7 +437,8 @@ def answer(text, config, state, jar, now):
             mode += " (หยุดไว้ รอตรวจผลการจอง)"
         web = "เข้าไม่ได้ กำลังลองใหม่" if state.get("expired_streak") else "ปกติ"
         return (f"🤖 บอททำงานอยู่\nเช็กล่าสุด: {state.get('last_check', 'ยังไม่มี')}\n"
-                f"เว็บสนาม: {web}\nจองอัตโนมัติ: {mode}")
+                f"เว็บสนาม: {web}\nจองอัตโนมัติ: {mode}\n"
+                f"วันที่ข้าม: {fmt_days(skipped_dates(config, state, now.date()))}")
     if "wallet" in t or "วอลเล็ต" in t or "ยอดเงิน" in t:
         bal = wallet_balance(jar)
         return f"Wallet คงเหลือ ฿{bal:,}" if bal is not None else "อ่านยอด Wallet ไม่ได้ตอนนี้"
@@ -517,6 +566,9 @@ def main():
             for loc in w.get("locs", ["LOC001"]):
                 jobs.setdefault((d, loc), []).append((w.get("from", "00:00"), w.get("to", "24:00")))
 
+    skip = skipped_dates(config, state, now.date())
+    state["skip_dates"] = sorted(d for d in state.get("skip_dates", []) if d >= now.date().isoformat())
+    jobs = {k: v for k, v in jobs.items() if k[0] not in skip}
     found, new_seen, errors, free_now = [], {}, [], []
     for (date, loc), ranges in sorted(jobs.items()):
         status, body, changed = fetch(date, loc, jar)
