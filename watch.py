@@ -583,7 +583,15 @@ if __name__ == "__main__":
     elif os.environ.get("LOOP_SECONDS"):
         # โหมดรันวน: เช็กทุก INTERVAL วินาที จนครบ LOOP_SECONDS แล้วจบเพื่อให้ workflow เริ่มรอบใหม่
         deadline = time.time() + int(os.environ["LOOP_SECONDS"])
-        interval = int(os.environ.get("INTERVAL", "300"))
+
+        def interval_seconds():
+            """ระยะห่างระหว่างรอบ อ่านจาก config ทุกรอบ จึงแก้แล้วมีผลโดยไม่ต้องเริ่มงานใหม่"""
+            try:
+                with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
+                    return max(60, int(json.load(f).get("interval_seconds", os.environ.get("INTERVAL", "300"))))
+            except (OSError, ValueError):
+                return 300
+
         expired_rounds = 0
         while True:
             started = time.time()
@@ -594,7 +602,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"รอบนี้ผิดพลาด: {type(e).__name__}: {e}", flush=True)
             sys.stdout.flush()
-            wait = interval - (time.time() - started)
+            wait = interval_seconds() - (time.time() - started)
             # เข้าเว็บไม่ได้ครบ 30 นาที: จบรอบนี้เพื่อให้รอบใหม่อ่านคุกกี้ที่อาจถูกอัปเดต
             if time.time() + max(wait, 0) >= deadline or expired_rounds >= 6:
                 break

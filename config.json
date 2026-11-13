@@ -3,6 +3,7 @@
     "LOC001": "Crystal Sports",
     "LOC002": "Crystal Sports G"
   },
+  "interval_seconds": 120,
   "active_hours": {
     "from": 8,
     "to": 23
@@ -31,7 +32,7 @@
         "LOC001",
         "LOC002"
       ],
-      "days_ahead": 14
+      "days_ahead": 5
     },
     {
       "weekdays": [
@@ -44,7 +45,7 @@
         "LOC001",
         "LOC002"
       ],
-      "days_ahead": 14
+      "days_ahead": 5
     }
   ]
 }
