@@ -179,6 +179,17 @@ def parse_review(page):
             "items": len(re.findall(r'name="coach_', form))}
 
 
+def site_message(page):
+    """ข้อความแจ้งเตือนที่เว็บแสดงบนหน้า (toast / ข้อความผิดพลาด) ตัดให้สั้น"""
+    parts = []
+    m = re.search(r'class="toast-stack"[^>]*>(.*?)<div class="ball-loader"', page, re.S)
+    if m:
+        parts.append(m.group(1))
+    parts += re.findall(r'<[a-z]+[^>]*class="[^"]*(?:alert|error|danger|invalid|validation)[^"]*"[^>]*>(.*?)</', page, re.S)
+    clean = (re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", p))).strip() for p in parts)
+    return " | ".join(dict.fromkeys(t for t in clean if t))[:300]
+
+
 def wallet_balance(jar):
     code, body, _, _ = http(jar, "/")
     m = re.search(r'class="wallet-card-amount">([\d,]+)<', body) if code == 200 else None
@@ -231,10 +242,14 @@ def book_slot(jar, date, loc, slot, cfg):
     title = re.search(r"<title>([^<]*)</title>", page or "")
     info["trail"] = " → ".join(trail)
     info["title"] = html.unescape(title.group(1)).strip() if title else ""
+    info["site_msg"] = site_message(page or "")
     after = wallet_balance(jar)
     info["after"] = after
     if after is not None and after == before - rv["price"]:
         return "booked", "จองและจ่ายด้วย Wallet แล้ว", info
+    if after == before and code == 200 and 'action="/booking/confirm"' in (page or ""):
+        # เว็บพากลับมาหน้ายืนยันเดิมและไม่ได้ตัดเงิน = ไม่รับการจอง
+        return "rejected", "เว็บไม่รับการจอง และไม่ได้ตัดเงิน", info
     return "uncertain", "ส่งคำสั่งจองแล้ว แต่ยอด Wallet ไม่ได้ลดตามราคา", info
 
 
@@ -271,18 +286,27 @@ def auto_book(state, config, jar, free_now, now):
             result, msg, info = "uncertain", f"ผิดพลาดระหว่างจอง: {type(e).__name__}", {}
         label = f"{DAYS_TH[d.weekday()]} {d.day}/{d.month} เวลา {s['time']} · {names.get(loc, loc)}"
         detail = f"{info.get('court', '')} · {info.get('when', '')} · ฿{info.get('price', '?')}" if info else ""
-        print(f"จองอัตโนมัติ [{result}] {label} · {msg}")
+        print(f"จองอัตโนมัติ [{result}] {label} · {msg} · {info.get('site_msg', '')}")
         if result == "booked":
+            state["rejects"] = 0
             booked.append({"date": date, "time": s["time"], "loc": loc})
             telegram(f"✅ จองให้แล้ว\n{label}\n{detail}\nWallet ฿{info['balance']} → ฿{info['after']}\n"
                      f"ยกเลิกได้ที่ {BASE}/bookings (ต้องล่วงหน้าอย่างน้อย 24 ชม.)")
         elif result == "dry":
             telegram(f"🧪 ซ้อมจอง (ยังไม่ได้จองจริง)\n{label}\n{detail}\nWallet ฿{info['balance']}\n{msg}")
+        elif result == "rejected":
+            state["rejects"] = state.get("rejects", 0) + 1
+            if state["rejects"] >= 3:  # โดนปฏิเสธซ้ำ ๆ น่าจะมีสาเหตุประจำ หยุดไว้ให้ตรวจ
+                state["paused_reset"] = reset
+            telegram(f"❌ จองไม่สำเร็จ ไม่มีการตัดเงิน\n{label}\n{detail}\n"
+                     f"เว็บแจ้งว่า: {info.get('site_msg') or '(ไม่มีข้อความ)'}"
+                     + ("\nโดนปฏิเสธ 3 ครั้งแล้ว บอทหยุดจองอัตโนมัติไว้ก่อน" if state["rejects"] >= 3 else ""))
         elif result == "uncertain":
             state["paused_reset"] = reset
             telegram(f"⚠️ ผลการจองไม่ชัดเจน บอทหยุดจองอัตโนมัติไว้ก่อน\n{label}\n{detail}\n{msg}\n"
                      f"Wallet ก่อน ฿{info.get('balance', '?')} หลัง ฿{info.get('after', '?')}\n"
                      f"เส้นทาง: {info.get('trail', '-')}\nหน้าสุดท้าย: {info.get('title', '-')}\n"
+                     f"เว็บแจ้งว่า: {info.get('site_msg') or '(ไม่มีข้อความ)'}\n"
                      f"ตรวจที่ {BASE}/bookings")
         else:
             telegram(f"ℹ️ ไม่ได้จองอัตโนมัติ\n{label}\n{detail}\n{msg}")
