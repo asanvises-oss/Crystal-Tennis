@@ -20,7 +20,7 @@
     "max_per_week": 2,
     "max_price": 700,
     "reset": 1,
-    "accept_terms": false
+    "accept_terms": true
   },
   "watches": [
     {
