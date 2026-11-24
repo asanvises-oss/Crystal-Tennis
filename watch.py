@@ -316,17 +316,34 @@ def auto_book(state, config, jar, free_now, now):
     if state.get("paused_reset") == reset:
         return  # หยุดไว้หลังผลจองไม่ชัดเจน รอให้เจ้าของตรวจแล้วเปลี่ยนค่า reset
     today = now.date().isoformat()
-    booked = [b for b in state.get("booked", []) if b["date"] >= today]
+    # เก็บรายการจองไว้ถึง 6 วันย้อนหลัง เพื่อให้เพดานต่อสัปดาห์นับการจองของวันที่ผ่านไปแล้วในสัปดาห์เดียวกันด้วย
+    keep_from = (dt.date.fromisoformat(today) - dt.timedelta(days=6)).isoformat()
+    booked = [b for b in state.get("booked", []) if b["date"] >= keep_from]
     attempted = {k: v for k, v in state.get("attempted", {}).items() if k[:10] >= today}
+    # ช่องที่เคยข้ามไปโดยไม่ได้ส่งคำสั่งจอง (สนามหมดพอดี ฯลฯ) ถ้าหายจากรายการว่างแล้วกลับมาว่างใหม่ ให้ลองจองใหม่ได้
+    free_keys = {f"{d}|{l}|{x['time']}" for d, l, x in free_now}
+    for k in [k for k, v in attempted.items() if (v == "skip" or v.startswith("wallet:")) and k not in free_keys]:
+        del attempted[k]
     state["booked"], state["attempted"] = booked, attempted
+    balance_now = []  # อ่านยอด Wallet เฉพาะเมื่อจำเป็น และอ่านครั้งเดียวต่อรอบ
+
+    def retry_after_topup(value):
+        if not balance_now:
+            balance_now.append(wallet_balance(jar))
+        return balance_now[0] is not None and balance_now[0] > int(value.split(":", 1)[1])
     names = config.get("loc_names", {})
     for date, loc, s in sorted(free_now, key=lambda x: (x[0], x[2]["time"], x[1])):
         key = f"{date}|{loc}|{s['time']}"
         d = dt.date.fromisoformat(date)
         start = dt.datetime.combine(d, dt.time(int(s["time"][:2])), BKK)
         dry = cfg.get("dry_run", True)
-        if attempted.get(key) == "live" or (dry and key in attempted) or (start - now).total_seconds() <= cfg.get("min_hours_ahead", 25) * 3600:
+        if (start - now).total_seconds() <= cfg.get("min_hours_ahead", 25) * 3600:
             continue
+        prev = attempted.get(key)
+        if prev == "live" or prev == "skip" or (dry and prev):
+            continue
+        if prev and prev.startswith("wallet:") and not retry_after_topup(prev):
+            continue  # เคยเงินไม่พอ ลองใหม่เมื่อยอด Wallet เพิ่มขึ้นเท่านั้น
         if sum(b["date"] == date for b in booked) >= cfg.get("max_per_day", 1):
             continue
         week = d.isocalendar()[:2]
@@ -338,6 +355,12 @@ def auto_book(state, config, jar, free_now, now):
             result, msg, info = book_slot(jar, date, loc, s, cfg)
         except Exception as e:
             result, msg, info = "uncertain", f"ผิดพลาดระหว่างจอง: {type(e).__name__}", {}
+        if result == "skipped":  # ยังไม่ได้ส่งคำสั่งจองเลย จึงลองใหม่ได้เมื่อเหตุผลเปลี่ยน
+            if msg.startswith("Wallet ไม่พอ") and info.get("balance") is not None:
+                attempted[key] = f"wallet:{info['balance']}"
+            else:
+                attempted[key] = "skip"
+        silent = result == "skipped" and bool(prev and prev.startswith("wallet:"))  # ลองซ้ำหลังเติมเงินแล้วยังไม่พอ ไม่ต้องแจ้งซ้ำ
         label = f"{DAYS_TH[d.weekday()]} {d.day}/{d.month} เวลา {s['time']} · {names.get(loc, loc)}"
         detail = f"{info.get('court', '')} · {info.get('when', '')} · ฿{info.get('price', '?')}" if info else ""
         print(f"จองอัตโนมัติ [{result}] {label} · {msg} · {info.get('site_msg', '')}")
@@ -362,7 +385,7 @@ def auto_book(state, config, jar, free_now, now):
                      f"เส้นทาง: {info.get('trail', '-')}\nหน้าสุดท้าย: {info.get('title', '-')}\n"
                      f"เว็บแจ้งว่า: {info.get('site_msg') or '(ไม่มีข้อความ)'}\n"
                      f"ตรวจที่ {BASE}/bookings")
-        else:
+        elif not silent:
             telegram(f"ℹ️ ไม่ได้จองอัตโนมัติ\n{label}\n{detail}\n{msg}")
         save(state)
         return  # รอบละไม่เกินหนึ่งครั้ง
